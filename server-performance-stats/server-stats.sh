@@ -1,87 +1,143 @@
 #!/bin/bash
 
-TIMESTAMP_DATE="$(date "+%y%m%d")"
-LOG_FILE="server-stats_${TIMESTAMP_DATE}.txt"
+# ============================
+# = Server Performance Stats =
+# ============================
 
-{
-        echo "######################"
-        echo "# System Uptime Info #"
-        echo "######################"
+# get system info
+get_system_infos(){
+    echo "-----------------"
+    echo "#1. System infos:"
+    echo "-----------------"
+    hostnamectl
+}
 
-        uptime
+# get system uptime
+get_system_uptime(){
+    echo "------------------"
+    echo "#2. System uptime:"
+    echo "------------------"
+    uptime
+}
 
-        echo
+# get logged in users
+get_logged_in_users(){
+    echo "--------------------"
+    echo "#3. Logged in users:"
+    echo "--------------------"
+    who
+}
 
-        echo "####################"
-        echo "# Total CPU Usage  #"
-        echo "####################"
-        top -bn1 | awk '/%Cpu\(s\)/ {print "Usage: " 100-$8 "%"}'
+# Header stats
+get_header_stats() {
+    get_system_infos
+    echo ""
+    get_system_uptime
+    echo ""
+    get_logged_in_users
+}
 
-        echo
+# get total CPU usage
+get_cpu_usage() {
+    echo "----------------"
+    echo "#4-1. CPU Usage:"
+    echo "----------------"
 
-        echo "######################"
-        echo "# Total Memory Usage #"
-        echo "######################"
-        free | awk '/^Mem:/ {total=$2/1024^2;used=$3/1024^2;avail=$7/1024^2; printf "Total: %.1fGi \nUsed: %.1fGi (%.2f%) \nAvail: %.1fGi (%.2f%)\n", total, used, (used/total)*100, avail, (avail/total)*100}'
+    local cpu_idle=$(vmstat 1 2 | tail -1 | awk '{print $15}')
+    echo "CPU Usage: $((100 - cpu_idle))%"
+}
 
-        echo
+# get top 5 processes by CPU usage
+get_top_cpu_processes() {
+    echo "-----------------------------------"
+    echo "#4-2. Top 5 Processes by CPU Usage:"
+    echo "-----------------------------------"
+    ps aux --sort -%cpu | head -n 6 | \
+    awk 'NR==1 {
+            printf "%-10s %-7s %-7s %-7s %s\n", "USER", "PID", "%CPU", "%MEM", "COMMAND"
+        }
+        NR>1 {
+            printf "%-10s %-7s %-7s %-7s %s\n", $1, $2, $3, $4, $11
+        }'
+}
 
+# get total memory usage
+get_memory_usage() {
+    echo "-------------------"
+    echo "#5-1. Memory Usage:"
+    echo "-------------------"
+    free | awk '/Mem:/ {
+        total=$2/1024^2; used=$3/1024^2; avail=$7/1024^2;
+        printf "Total: %.1fGi \nUsed: %.1fGi (%.2f%%) \nAvail: %.1fGi (%.2f%%)\n", \
+        total, used, (used/total)*100, avail, (avail/total)*100
+    }'
+}
 
-        echo "#####################"
-        echo "# Total Disk Usage  #"
-        echo "#####################"
+# get top 5 processes by memory usage
+get_top_memory_processes() {
+    echo "--------------------------------------"
+    echo "#5-2. Top 5 Processes by Memory Usage:"
+    echo "--------------------------------------"
+    ps aux --sort -%mem | head -n 6 | \
+    awk 'NR==1 {
+            printf "%-10s %-7s %-7s %-7s %s\n", "USER", "PID", "%CPU", "%MEM", "COMMAND"
+        }
+        NR>1 {
+            printf "%-10s %-7s %-7s %-7s %-50.50s\n", $1, $2, $3, $4, $11
+        }'
+}
 
-        # 점검할 경로 리스트(엔진 경로, 로그 경로)
-        DISK_TARGETS=("/orcl" "/opsr")
-        for path in "${DISK_TARGETS[@]}"
-        do
-                if [ -d "$path" ]; then
-                        df -h "$path" | awk 'NR==2 {printf "[%-10s] Total: %5s | Used: %5s (%s) | Free: %5s\n", $6, $2, $3, $5, $4}'
-                fi
-        done
+# get total disk usage
+get_disk_usage() {
+    echo "---------------"
+    echo "#6. Disk Usage:"
+    echo "---------------"
 
-        echo
+    local DISK_TARGETS=("/orcl" "/opsr" "/")
 
-        echo "################################"
-        echo "# Top 5 processes by CPU usage #"
-        echo "################################"
+    printf "%-12s %-8s %-8s %-8s %-5s\n" "Mount" "Total" "Used" "Free" "Use%"
+    for path in "${DISK_TARGETS[@]}"; do
+        if [ -d "$path" ]; then
+            local TARGET_EX=$(df -h "$path" | awk 'NR==2')
 
-        ps aux --sort -%cpu | head -n 6 | awk 'NR==1 {printf "%-10s %-7s %-7s %-7s %s\n", "USER", "PID", "%CPU", "%MEM", "COMMAND"} NR>1 {printf "%-10s %-7s %-7s %-7s %s\n", $1, $2, $3, $4, $11}'
+            if [ -z "$TARGET_EX" ]; then
+                printf "%-12s %-30s\n" "$path" "[ERROR] Partition not found"
 
-        echo
-
-        echo "################################"
-        echo "# Top 1 Process Detailed Info  #"
-        echo "################################"
-
-        TOP_PID=$(ps aux --sort -%cpu | awk 'NR==2 {print $2}')
-        if [ -n "$TOP_PID" ]; then
-                echo "Detailed info for Top Memory Process (PID: $TOP_PID):"
-                ps -fp $TOP_PID -ww | awk 'NR==2 {print $0}'
+            else
+                echo "$TARGET_EX" | awk -v p="$path" '{
+                    usage=$5; gsub(/%/,"",usage);
+                    status = (usage >= 90) ? "[ALERT]" : "OK";
+                    printf "%-12s %-8s %-8s %-8s %-5s %-10s\n", $6, $2, $3, $4, $5, status
+                }'
+            fi
         else
-                echo "No process found."
+            printf "%-12s %-30s\n" "$path" "[SKIP] Directory not found"
         fi
+    done
+}
 
-        echo
+main() {
+    echo "======================================="
+    echo "Server Performance Stats"
+    echo "======================================="
 
-        echo "###################################"
-        echo "# Top 5 processes by Memory usage #"
-        echo "###################################"
+    get_header_stats
+    echo ""
 
-        ps aux --sort -%mem | head -n 6 | awk 'NR==1 {printf "%-10s %-7s %-7s %-7s %s\n", "USER", "PID", "%CPU", "%MEM", "COMMAND"} NR>1 {printf "%-10s %-7s %-7s %-7s %-50.50s\n", $1, $2, $3, $4, $11}'
+    get_cpu_usage
+    echo ""
 
-        echo
+    get_top_cpu_processes
+    echo ""
 
-        echo "################################"
-        echo "# Top 1 Process Detailed Info  #"
-        echo "################################"
+    get_memory_usage
+    echo ""
 
-        TOP_PID=$(ps aux --sort -%mem | awk 'NR==2 {print $2}')
-        if [ -n "$TOP_PID" ]; then
-                echo "Detailed info for Top Memory Process (PID: $TOP_PID):"
-                ps -fp $TOP_PID -ww | awk 'NR==2 {print $0}'
-        else
-                echo "No process found."
-        fi
+    get_top_memory_processes
+    echo ""
 
-} > "$LOG_FILE"
+    get_disk_usage
+    echo ""
+}
+
+main
